@@ -13,21 +13,28 @@ Listen string  `json:"listen"`
 Routes []Route `json:"routes"`
 }
 
-// LoadConfig reads gateproxy.json (or the file passed as the first CLI arg),
-// validates it, and falls back to sensible defaults when fields are missing.
+// LoadConfig resolves the config path: -c path wins, then a positional arg,
+// then ./gateproxy.json, then built-in defaults.
 func LoadConfig() (*Config, error) {
 path := "gateproxy.json"
-if len(os.Args) > 1 {
-path = os.Args[1]
+args := os.Args[1:]
+for i, a := range args {
+if a == "-c" && i+1 < len(args) {
+path = args[i+1]
+args = append(args[:i], args[i+2:]...)
+break
+}
+}
+if len(args) > 0 {
+path = args[0]
 }
 
 cfg := &Config{Listen: ":8080"}
 
 raw, err := os.ReadFile(path)
 switch {
-case os.IsNotExist(err) && len(os.Args) <= 1:
-// No config file and no explicit path: use defaults, log a warning.
-log.Printf("no config file found at %s, using defaults", path)
+case os.IsNotExist(err) && path == "gateproxy.json":
+log.Printf("no config file at %s, using defaults", path)
 cfg.Routes = defaultRoutes()
 return cfg, nil
 case err != nil:
@@ -37,7 +44,6 @@ return nil, fmt.Errorf("reading config: %w", err)
 if err := json.Unmarshal(raw, cfg); err != nil {
 return nil, fmt.Errorf("parsing %s: %w", path, err)
 }
-
 if cfg.Listen == "" {
 cfg.Listen = ":8080"
 }
@@ -49,7 +55,7 @@ if r.Prefix == "" || r.Upstream == "" {
 return nil, fmt.Errorf("%s: route %d missing prefix or upstream", path, i)
 }
 if r.RatePerMinute <= 0 {
-cfg.Routes[i].RatePerMinute = 100 // safe default
+cfg.Routes[i].RatePerMinute = 100
 }
 }
 return cfg, nil

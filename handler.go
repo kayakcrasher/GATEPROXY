@@ -4,30 +4,45 @@ import (
 "bufio"
 "fmt"
 "io"
-"log"
 "net"
 "strconv"
 "strings"
 "time"
 )
 
+type countingWriter struct {
+conn  net.Conn
+count int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+n, err := cw.conn.Write(p)
+cw.count += int64(n)
+return n, err
+}
+
 func handleClient(client net.Conn) {
 defer client.Close()
-_ = client.SetDeadline(time.Now().Add(30 * time.Second))
+start := time.Now()
+_ = client.SetDeadline(start.Add(30 * time.Second))
+clientIP := ipOnly(client.RemoteAddr().String())
 
 reader := bufio.NewReader(client)
 
-// --- Request line: METHOD /path HTTP/1.1 ---
+// --- Request line ---
 requestLine, err := reader.ReadString('\n')
 if err != nil {
 return
 }
 parts := strings.Fields(strings.TrimSpace(requestLine))
-if len(parts) < 3 {
+method, path := "-", "-"
+if len(parts) >= 3 {
+method, path = parts[0], parts[1]
+} else {
 writeSimpleResponse(client, 400, "Bad Request")
+logRequest(clientIP, method, path, 400, 0, time.Since(start), "")
 return
 }
-method, path := parts[0], parts[1]
 
 // --- Headers ---
 var contentLength int64
@@ -53,28 +68,36 @@ contentLength, _ = strconv.ParseInt(strings.TrimSpace(clean[idx+1:]), 10, 64)
 route, ok := MatchRoute(path)
 if !ok {
 writeSimpleResponse(client, 404, "No Route")
+logRequest(clientIP, method, path, 404, 0, time.Since(start), "")
 return
 }
 
-// --- Rate limiting (per client IP) ---
-clientIP := ipOnly(client.RemoteAddr().String())
+// --- Rate limiting ---
 if !limiterFor(route.RatePerMinute).Allow(clientIP) {
-log.Printf("RATE LIMITED %s %s from %s", method, path, clientIP)
 writeSimpleResponse(client, 429, "Too Many Requests")
+logRequest(clientIP, method, path, 429, 0, time.Since(start), route.Upstream)
 return
 }
 
-// --- Connect upstream ---
+// --- Health check: known-dead upstream -> 503 ---
+if IsDown(route.Upstream) {
+writeSimpleResponse(client, 503, "Service Unavailable")
+logRequest(clientIP, method, path, 503, 0, time.Since(start), route.Upstream)
+return
+}
+
+// --- Dial upstream ---
 backend, err := net.DialTimeout("tcp", route.Upstream, 5*time.Second)
 if err != nil {
-log.Printf("upstream unreachable: %v", err)
+MarkDown(route.Upstream)
 writeSimpleResponse(client, 502, "Bad Gateway")
+logRequest(clientIP, method, path, 502, 0, time.Since(start), route.Upstream)
 return
 }
 defer backend.Close()
-_ = backend.SetDeadline(time.Now().Add(30 * time.Second))
+_ = backend.SetDeadline(start.Add(30 * time.Second))
 
-// --- Forward request line + headers (strip hop-by-hop) ---
+// --- Forward request ---
 fmt.Fprintf(backend, "%s %s HTTP/1.1\r\n", method, path)
 for _, h := range headerLines {
 idx := strings.Index(h, ":")
@@ -87,21 +110,41 @@ continue
 }
 fmt.Fprintf(backend, "%s\r\n", h)
 }
-fmt.Fprintf(backend, "X-Forwarded-For: %s\r\n", clientIP)
-fmt.Fprintf(backend, "Connection: close\r\n\r\n")
+fmt.Fprintf(backend, "X-Forwarded-For: %s\r\nConnection: close\r\n\r\n", clientIP)
 
-// --- Forward the body (Content-Length bytes), streamed ---
 if contentLength > 0 {
 if _, err := io.CopyN(backend, reader, contentLength); err != nil {
-log.Printf("body forward error: %v", err)
+logEvent("warn", "body forward error: "+err.Error())
 return
 }
 }
 
-log.Printf("%s %s -> %s (body=%d bytes)", method, path, route.Upstream, contentLength)
+// --- Read backend status line, then stream the rest ---
+breader := bufio.NewReader(backend)
+statusLine, err := breader.ReadString('\n')
+if err != nil {
+MarkDown(route.Upstream)
+writeSimpleResponse(client, 502, "Bad Gateway")
+logRequest(clientIP, method, path, 502, 0, time.Since(start), route.Upstream)
+return
+}
+status := parseStatus(statusLine)
 
-// --- Stream response back to client ---
-io.Copy(client, backend)
+cw := &countingWriter{conn: client}
+cw.Write([]byte(statusLine))
+io.Copy(cw, breader)
+
+logRequest(clientIP, method, path, status, cw.count, time.Since(start), route.Upstream)
+}
+
+func parseStatus(line string) int {
+fields := strings.Fields(strings.TrimSpace(line))
+if len(fields) >= 2 {
+if code, err := strconv.Atoi(fields[1]); err == nil {
+return code
+}
+}
+return 502
 }
 
 func writeSimpleResponse(conn net.Conn, status int, reason string) {
