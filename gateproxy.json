@@ -1,0 +1,15 @@
+{
+  "listen": ":8080",
+  "routes": [
+    {
+      "prefix": "/api/v1/",
+      "upstream": "127.0.0.1:9001",
+      "rate_per_minute": 100
+    },
+    {
+      "prefix": "/api/v2/",
+      "upstream": "127.0.0.1:9002",
+      "rate_per_minute": 10
+    }
+  ]
+}

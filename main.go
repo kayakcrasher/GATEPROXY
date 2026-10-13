@@ -6,12 +6,22 @@ import (
 )
 
 func main() {
-listener, err := net.Listen("tcp", ":8080")
+cfg, err := LoadConfig()
 if err != nil {
-log.Fatalf("failed to listen: %v", err)
+log.Fatalf("config error: %v", err)
+}
+routes = cfg.Routes
+
+listener, err := net.Listen("tcp", cfg.Listen)
+if err != nil {
+log.Fatalf("failed to listen on %s: %v", cfg.Listen, err)
 }
 defer listener.Close()
-log.Println("GATEPROXY listening on :8080")
+
+log.Printf("GATEPROXY listening on %s with %d route(s)", cfg.Listen, len(routes))
+for _, r := range routes {
+log.Printf("  %s -> %s (%d req/min per IP)", r.Prefix, r.Upstream, r.RatePerMinute)
+}
 
 for {
 conn, err := listener.Accept()

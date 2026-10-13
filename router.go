@@ -4,15 +4,13 @@ import "strings"
 
 // Route maps a path prefix to an upstream backend and a per-IP rate limit.
 type Route struct {
-Prefix        string
-Upstream      string
-RatePerMinute int
+Prefix        string `json:"prefix"`
+Upstream      string `json:"upstream"`
+RatePerMinute int    `json:"rate_per_minute"`
 }
 
-var routes = []Route{
-{Prefix: "/api/v1/", Upstream: "127.0.0.1:9001", RatePerMinute: 100},
-{Prefix: "/api/v2/", Upstream: "127.0.0.1:9002", RatePerMinute: 10},
-}
+// routes is populated by LoadConfig at startup.
+var routes []Route
 
 // MatchRoute returns the first route whose prefix matches the path.
 func MatchRoute(path string) (Route, bool) {
